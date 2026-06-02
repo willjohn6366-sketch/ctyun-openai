@@ -4,7 +4,7 @@ import "./ui.css";
 
 const VERSION = "0.0.2";
 const VERSION_URL =
-  "https://cdn.jsdelivr.net/gh/willjohn6366-sketch/ctyun-openai@main/version.json";
+  "https://raw.githubusercontent.com/willjohn6366-sketch/ctyun-openai/main/version.json";
 const REPO_URL = "https://github.com/willjohn6366-sketch/ctyun-openai";
 
 const TABS = [

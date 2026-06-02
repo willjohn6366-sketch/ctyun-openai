@@ -31,7 +31,7 @@ const CTYUN_MODELS_URL =
 const CTYUN_USER_INFO_URL = "https://eaichat.ctyun.cn/ai/portal/v1/user/queryUserInfo";
 const CTYUN_HISTORY_URL = "https://eaichat.ctyun.cn/ai/portal/v2/openai/chat/history";
 const CTYUN_OFFSET_URL = "https://eaichat.ctyun.cn/ai/portal/v2/openai/chat/offset";
-const VERSION_URL = "https://cdn.jsdelivr.net/gh/willjohn6366-sketch/ctyun-openai@main/version.json";
+const VERSION_URL = "https://raw.githubusercontent.com/willjohn6366-sketch/ctyun-openai/main/version.json";
 const SOURCE_TARBALL_URL = "https://codeload.github.com/willjohn6366-sketch/ctyun-openai/tar.gz/main";
 
 
@@ -1909,7 +1909,10 @@ async function handlePostConfig(req, res) {
 }
 
 async function fetchRemoteVersionInfo() {
-  const response = await fetch(VERSION_URL, {
+  const url = new URL(VERSION_URL);
+  url.searchParams.set("t", String(Date.now()));
+
+  const response = await fetch(url, {
     headers: {
       accept: "application/json"
     }
@@ -1936,7 +1939,7 @@ async function handleUpdateCheck(_req, res) {
     currentVersion: localInfo.version,
     latestVersion: remoteInfo.version,
     changelog: remoteInfo.changelog || "",
-    updateAvailable: compareResult < 0,
+    updateAvailable: compareResult > 0,
     status: readUpdateStatus()
   });
 }
