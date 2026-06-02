@@ -829,6 +829,11 @@ function pickFirstDefined(...values) {
   return values.find((value) => value !== undefined && value !== null && value !== "");
 }
 
+function pickBoolean(defaultValue, ...values) {
+  const value = values.find((item) => typeof item === "boolean");
+  return typeof value === "boolean" ? value : defaultValue;
+}
+
 function getOpenAIConversationFingerprint(openaiBody) {
   const messages = getOpenAIMessages(openaiBody);
   const anchors = [];
@@ -1463,9 +1468,9 @@ async function toCtyunRequest(openaiBody, keyModel, cookie, conversationSession 
     messages,
     stream: true,
     client_retry: true,
-    web_search: typeof openaiBody.web_search === "boolean" ? openaiBody.web_search : false,
+    web_search: pickBoolean(true, openaiBody.web_search, openaiBody.webSearch),
     tenantId: 15,
-    enable_thinking: typeof openaiBody.enable_thinking === "boolean" ? openaiBody.enable_thinking : false,
+    enable_thinking: pickBoolean(false, openaiBody.enable_thinking, openaiBody.enableThinking),
     action: {},
     tools: []
   };
