@@ -1,0 +1,12 @@
+services:
+  ct-api:
+    image: node:20
+    container_name: ct-api
+    restart: unless-stopped
+    working_dir: /app
+    command: sh -c "npm install && npm run build && npm start"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./:/app
+      - ./data:/app/data

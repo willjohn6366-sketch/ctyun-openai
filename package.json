@@ -1,0 +1,25 @@
+{
+  "name": "ctyun-openai",
+  "version": "0.0.2",
+  "description": "Compatible proxy service for cloud desktop AI chat completions API",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "frontend:dev": "vite",
+    "build": "vite build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.0",
+    "vite": "^7.2.1"
+  },
+  "license": "MIT"
+}
