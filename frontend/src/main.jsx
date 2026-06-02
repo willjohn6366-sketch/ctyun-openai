@@ -17,6 +17,7 @@ const TABS = [
 const LEAVE_DURATION = 150;
 const ENTER_DURATION = 220;
 const ACTIVE_PAGE_KEY = "ct-api-active-page";
+const UPDATE_SUCCESS_KEY = "ct-api-update-success-target";
 const DEFAULT_PAGE = "home";
 const PAGE_PATHS = {
   home: "/",
@@ -182,6 +183,32 @@ function App() {
     }
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    const targetVersion = window.localStorage.getItem(UPDATE_SUCCESS_KEY);
+    if (!targetVersion) return undefined;
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const payload = await requestJson("/api/update/check");
+        if (cancelled) return;
+
+        if (!payload.updateAvailable && payload.currentVersion === targetVersion) {
+          setUpdateInfo(payload);
+          document.getElementById("update-success-dialog")?.showPopover?.();
+          window.localStorage.removeItem(UPDATE_SUCCESS_KEY);
+        }
+      } catch {
+        // Ignore the first refresh race after restart.
+      }
+    }, 1200);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isUpdating) return undefined;
@@ -546,6 +573,9 @@ function App() {
   async function applyUpdate() {
     try {
       setIsUpdating(true);
+      if (updateInfo?.latestVersion) {
+        window.localStorage.setItem(UPDATE_SUCCESS_KEY, updateInfo.latestVersion);
+      }
       const status = await requestJson("/api/update/apply", {
         method: "POST"
       });
@@ -560,6 +590,10 @@ function App() {
   function closeUpdateDialog() {
     if (isUpdating) return;
     document.getElementById("update-dialog")?.hidePopover?.();
+  }
+
+  function closeUpdateSuccessDialog() {
+    document.getElementById("update-success-dialog")?.hidePopover?.();
   }
 
   if (!authChecked) {
@@ -1049,7 +1083,29 @@ function App() {
                 取消
               </button>
               <button className="primary-button" disabled={isUpdating} onClick={applyUpdate} type="button">
-                {isUpdating ? "更新中" : "立即更新新版本"}
+                {isUpdating ? "更新中" : "立即更新"}
+              </button>
+            </div>
+      </section>
+      <section className="modal-card password-popover" id="update-success-dialog" popover="auto" aria-labelledby="update-success-dialog-title">
+            <div className="modal-head">
+              <div>
+                <h2 id="update-success-dialog-title">已更新到最新版本</h2>
+                <p>当前版本 V{VERSION}</p>
+              </div>
+              <button
+                className="icon-button"
+                onClick={closeUpdateSuccessDialog}
+                title="关闭"
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="modal-actions">
+              <button className="primary-button" onClick={closeUpdateSuccessDialog} type="button">
+                知道了
               </button>
             </div>
       </section>
