@@ -16,6 +16,7 @@ const USAGE_FILE = join(DATA_DIR, "usage.json");
 const USERS_FILE = join(DATA_DIR, "users.json");
 const UPDATE_STATUS_FILE = join(DATA_DIR, "update-status.json");
 const UPDATE_BACKUP_DIR = join(DATA_DIR, "backups");
+const UPDATE_STATUS_STALE_MS = 2 * 60 * 1000;
 
 const DEFAULT_PORT = 3000;
 const LISTEN_HOST = "0.0.0.0";
@@ -140,6 +141,31 @@ function compareVersions(currentVersion, latestVersion) {
 
 function readUpdateStatus() {
   return safeReadJson(UPDATE_STATUS_FILE, createIdleUpdateStatus());
+}
+
+function normalizeUpdateStatus(status = readUpdateStatus()) {
+  if (!status || typeof status !== "object") {
+    return createIdleUpdateStatus();
+  }
+
+  const nextStatus = {
+    ...createIdleUpdateStatus(),
+    ...status
+  };
+
+  const lastUpdatedAt = new Date(nextStatus.updatedAt || 0).getTime();
+  const isExpirableState = nextStatus.status === "running" || nextStatus.status === "restarting";
+  const isExpired =
+    isExpirableState && Number.isFinite(lastUpdatedAt) && Date.now() - lastUpdatedAt > UPDATE_STATUS_STALE_MS;
+
+  if (!isExpired) return nextStatus;
+
+  return writeUpdateStatus({
+    ...createIdleUpdateStatus(),
+    startedAt: null,
+    finishedAt: new Date().toISOString(),
+    error: ""
+  });
 }
 
 function writeUpdateStatus(patch) {
@@ -1939,22 +1965,23 @@ async function handleUpdateCheck(_req, res) {
   const localInfo = readLocalVersionInfo();
   const remoteInfo = await fetchRemoteVersionInfo();
   const compareResult = compareVersions(localInfo.version, remoteInfo.version);
+  const status = normalizeUpdateStatus();
 
   sendJson(res, 200, {
     currentVersion: localInfo.version,
     latestVersion: remoteInfo.version,
     changelog: remoteInfo.changelog || "",
     updateAvailable: compareResult > 0,
-    status: readUpdateStatus()
+    status
   });
 }
 
 async function handleUpdateStatus(_req, res) {
-  sendJson(res, 200, readUpdateStatus());
+  sendJson(res, 200, normalizeUpdateStatus());
 }
 
 async function handleUpdateApply(_req, res) {
-  const status = readUpdateStatus();
+  const status = normalizeUpdateStatus();
   if (status.status === "running" || status.status === "restarting") {
     sendJson(res, 409, {
       error: {

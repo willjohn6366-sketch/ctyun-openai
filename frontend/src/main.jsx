@@ -530,11 +530,12 @@ function App() {
       setUpdateStatus(payload.status || null);
 
       if (!payload.updateAvailable) {
+        document.getElementById("update-dialog")?.hidePopover?.();
         showToast("当前已是最新版");
         return;
       }
 
-      showToast(`发现新版本 ${payload.latestVersion}`);
+      document.getElementById("update-dialog")?.showPopover?.();
     } catch (error) {
       handleRequestError(error);
     } finally {
@@ -554,6 +555,11 @@ function App() {
       setIsUpdating(false);
       handleRequestError(error);
     }
+  }
+
+  function closeUpdateDialog() {
+    if (isUpdating) return;
+    document.getElementById("update-dialog")?.hidePopover?.();
   }
 
   if (!authChecked) {
@@ -941,18 +947,7 @@ function App() {
                     <a className="source-link" href={REPO_URL} rel="noreferrer" target="_blank">
                       查看源码
                     </a>
-                    {updateInfo?.updateAvailable ? (
-                      <button className="primary-button" disabled={isUpdating} onClick={applyUpdate} type="button">
-                        {isUpdating ? "更新中" : `更新到 V${updateInfo.latestVersion}`}
-                      </button>
-                    ) : null}
                   </div>
-                  {updateInfo?.updateAvailable && updateInfo.changelog ? (
-                    <p className="about-signature">{updateInfo.changelog}</p>
-                  ) : null}
-                  {updateStatus?.status && updateStatus.status !== "idle" ? (
-                    <p className="about-signature">{updateStatus.message || updateStatus.status}</p>
-                  ) : null}
                   <p className="about-signature">by: 斯坦尼斯王夫斯基</p>
                 </div>
               </section>
@@ -1025,6 +1020,36 @@ function App() {
               </button>
               <button className="primary-button" onClick={changePassword} type="button">
                 保存
+              </button>
+            </div>
+      </section>
+      <section className="modal-card password-popover" id="update-dialog" popover="auto" aria-labelledby="update-dialog-title">
+            <div className="modal-head">
+              <div>
+                <h2 id="update-dialog-title">发现新版本 {updateInfo?.latestVersion ? `V${updateInfo.latestVersion}` : ""}</h2>
+                <p>当前版本 V{updateInfo?.currentVersion || VERSION}</p>
+              </div>
+              <button
+                className="icon-button"
+                onClick={closeUpdateDialog}
+                title="关闭"
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+
+            {updateInfo?.changelog ? <div className="update-note">{updateInfo.changelog}</div> : null}
+            {isUpdating || (updateStatus?.status && updateStatus.status !== "idle") ? (
+              <div className="update-note">{updateStatus?.message || "正在处理更新"}</div>
+            ) : null}
+
+            <div className="modal-actions">
+              <button className="secondary-button" onClick={closeUpdateDialog} type="button">
+                取消
+              </button>
+              <button className="primary-button" disabled={isUpdating} onClick={applyUpdate} type="button">
+                {isUpdating ? "更新中" : "立即更新新版本"}
               </button>
             </div>
       </section>

@@ -887,6 +887,16 @@ button:focus-visible {
   gap: 10px;
 }
 
+.update-note {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.7;
+  background: var(--panel-soft);
+}
+
 body.dark {
   --bg: #0b1220;
   --panel: #111a2b;
@@ -963,6 +973,11 @@ body.dark .modal-head h2 {
 
 body.dark .modal-head p {
   color: #9dafc5;
+}
+
+body.dark .update-note {
+  background: #0d1728;
+  border-color: #243552;
 }
 
 body.dark .form-error {
