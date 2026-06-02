@@ -1,6 +1,6 @@
 {
   "name": "ctyun-openai",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Compatible proxy service for cloud desktop AI chat completions API",
   "type": "module",
   "main": "src/server.js",
