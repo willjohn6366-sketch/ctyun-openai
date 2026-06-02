@@ -168,6 +168,21 @@ function normalizeUpdateStatus(status = readUpdateStatus()) {
   });
 }
 
+function reconcileUpdateStatusOnStartup() {
+  const status = normalizeUpdateStatus(readUpdateStatus());
+
+  if (status.status !== "restarting") {
+    return status;
+  }
+
+  return writeUpdateStatus({
+    ...createIdleUpdateStatus(),
+    startedAt: status.startedAt || null,
+    finishedAt: new Date().toISOString(),
+    error: ""
+  });
+}
+
 function writeUpdateStatus(patch) {
   const nextStatus = {
     ...readUpdateStatus(),
@@ -2182,6 +2197,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 ensureDataFiles();
+reconcileUpdateStatusOnStartup();
 currentListenPort = readConfig().listenPort;
 
 server.listen(currentListenPort, LISTEN_HOST, () => {
