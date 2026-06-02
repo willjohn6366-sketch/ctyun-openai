@@ -554,7 +554,7 @@ function App() {
     try {
       const payload = await requestJson("/api/update/check");
       setUpdateInfo(payload);
-      setUpdateStatus(payload.status || null);
+      setUpdateStatus(null);
 
       if (!payload.updateAvailable) {
         document.getElementById("update-dialog")?.hidePopover?.();
@@ -1074,7 +1074,7 @@ function App() {
             </div>
 
             {updateInfo?.changelog ? <div className="update-note">{updateInfo.changelog}</div> : null}
-            {isUpdating || (updateStatus?.status && updateStatus.status !== "idle") ? (
+            {isUpdating ? (
               <div className="update-note">{updateStatus?.message || "正在处理更新"}</div>
             ) : null}
 
