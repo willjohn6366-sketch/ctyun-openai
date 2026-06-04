@@ -750,7 +750,7 @@ function App() {
                 ) : (
                   models.map((model) => (
                     <div className="model-row" key={`${model.id}-${model.key_model}`}>
-                      <div className="model-id">{model.title || model.display_name || model.id}</div>
+                      <div className="model-id">{model.key_model || model.title || model.id}</div>
                       <div>{model.typeLabel || "-"}</div>
                       <div>{model.seriesLabel || "-"}</div>
                       <div>{model.modelAbilityLabelName || "-"}</div>

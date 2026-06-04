@@ -519,7 +519,14 @@ function readModelCatalog() {
         )
     )
     .map((item) => ({
-      id: String(item.presetModelName || item.title || item.display_name || item.name || item.id).trim(),
+      id: String(
+        item.key_model ||
+          item.presetModelName ||
+          item.title ||
+          item.display_name ||
+          item.name ||
+          item.id
+      ).trim(),
       object: "model",
       created: 0,
       owned_by: item.owned_by || "ctyun",
