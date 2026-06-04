@@ -1,5 +1,18 @@
 [
   {
+    "id": "openclaw_ctyun-smart-oc",
+    "title": "openclaw_ctyun-smart-oc",
+    "typeLabel": "默认模型",
+    "seriesLabel": "龙虾专用",
+    "modelAbilityLabelName": null,
+    "display_name": "openclaw_ctyun-smart-oc",
+    "key_model": "openclaw_ctyun-smart-oc",
+    "status": "available",
+    "type": "text",
+    "owned_by": "ctyun",
+    "presetModelName": "openclaw_ctyun-smart-oc"
+  },
+  {
     "id": "62cc400ee35e43808b1688fcbc9c3e88",
     "title": "MiniMax-M3",
     "typeLabel": "文本生成",
