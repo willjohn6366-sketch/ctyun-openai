@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./ui.css";
 
-const VERSION = "0.0.3";
+const VERSION = "0.0.4";
 const VERSION_URL =
   "https://raw.githubusercontent.com/willjohn6366-sketch/ctyun-openai/main/version.json";
 const REPO_URL = "https://github.com/willjohn6366-sketch/ctyun-openai";
@@ -92,25 +92,6 @@ async function requestJson(url, options = {}) {
   return data;
 }
 
-function modelStatusClass(status) {
-  const normalized = String(status || "").toLowerCase();
-  if (normalized === "avaiable" || normalized === "available") {
-    return "badge";
-  }
-  return "badge error";
-}
-
-function renderStatusText(status) {
-  const normalized = String(status || "").toLowerCase();
-  if (normalized === "avaiable" || normalized === "available") {
-    return "● 可用";
-  }
-  if (!status) {
-    return "● 未知";
-  }
-  return `● ${status}`;
-}
-
 function compareVersions(currentVersion, nextVersion) {
   const current = String(currentVersion || "")
     .split(".")
@@ -145,7 +126,7 @@ function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [dashboard, setDashboard] = useState(null);
   const [config, setConfig] = useState(null);
-  const [cookieInput, setCookieInput] = useState("");
+  const [upstreamTokenInput, setUpstreamTokenInput] = useState("");
   const [listenPort, setListenPort] = useState(3000);
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
@@ -273,7 +254,7 @@ function App() {
   async function loadConfig() {
     const nextConfig = await requestJson("/api/config");
     setConfig(nextConfig);
-    setCookieInput("");
+    setUpstreamTokenInput("");
     setListenPort(nextConfig.listenPort || 3000);
   }
 
@@ -361,7 +342,7 @@ function App() {
     ? [account.mobile ? `手机：${account.mobile}` : "", account.expiresAt ? `令牌过期：${formatDate(account.expiresAt)}` : ""]
         .filter(Boolean)
         .join(" · ") || account.accountError || "已读取账号信息"
-    : "请在账号管理中配置 Cookie";
+    : "请在账号管理中配置上游令牌";
 
   async function refreshDashboard() {
     try {
@@ -372,21 +353,21 @@ function App() {
     }
   }
 
-  async function saveCookie() {
+  async function saveUpstreamToken() {
     try {
-      const cookie = cookieInput.trim();
-      if (!cookie) {
-        showToast("请先粘贴 JWT 令牌");
+      const upstreamToken = upstreamTokenInput.trim();
+      if (!upstreamToken) {
+        showToast("请先粘贴上游 Bearer 令牌");
         return;
       }
       const nextConfig = await requestJson("/api/config", {
         method: "POST",
-        body: JSON.stringify({ cookie })
+        body: JSON.stringify({ upstreamToken })
       });
       setConfig(nextConfig);
-      setCookieInput("");
+      setUpstreamTokenInput("");
       await loadDashboard();
-      showToast("Cookie 已保存");
+      showToast("上游令牌已保存");
     } catch (error) {
       handleRequestError(error);
     }
@@ -756,11 +737,10 @@ function App() {
               </div>
 
               <div className="table-header">
-                <div>模型 ID</div>
-                <div>模型名称</div>
-                <div>Key Model</div>
-                <div>状态</div>
+                <div>标题</div>
                 <div>类型</div>
+                <div>系列</div>
+                <div>能力</div>
               </div>
               <div className="model-list">
                 {dashboard?.modelsError ? (
@@ -770,13 +750,10 @@ function App() {
                 ) : (
                   models.map((model) => (
                     <div className="model-row" key={`${model.id}-${model.key_model}`}>
-                      <div className="model-id">{model.id}</div>
-                      <div>{model.display_name || model.id}</div>
-                      <div className="key-model">{model.key_model || "-"}</div>
-                      <div>
-                        <span className={modelStatusClass(model.status)}>{renderStatusText(model.status)}</span>
-                      </div>
-                      <div>{model.type || "-"}</div>
+                      <div className="model-id">{model.title || model.display_name || model.id}</div>
+                      <div>{model.typeLabel || "-"}</div>
+                      <div>{model.seriesLabel || "-"}</div>
+                      <div>{model.modelAbilityLabelName || "-"}</div>
                     </div>
                   ))
                 )}
@@ -790,74 +767,45 @@ function App() {
             <div className="settings-layout">
               <section className="settings-card wide">
                 <div className="section-title">
-                  <span>Cookie 设置</span>
-                  <small>用于请求云电脑上游接口</small>
+                  <span>上游令牌设置</span>
+                  <small>填写上游接口 `Authorization: Bearer` 后面的值</small>
                 </div>
 
                 <label className="field">
-                  <span>JWT 令牌（YL-Token）</span>
+                  <span>Bearer 令牌</span>
                   <textarea
-                    value={cookieInput}
-                    onChange={(event) => setCookieInput(event.target.value)}
-                    placeholder="只粘贴 JWT 内容，例如 eyJ...；已保存内容仅显示脱敏预览"
+                    value={upstreamTokenInput}
+                    onChange={(event) => setUpstreamTokenInput(event.target.value)}
+                    placeholder="只粘贴 Authorization: Bearer 后面的值；已保存内容仅显示脱敏预览"
                     spellCheck="false"
                   />
                 </label>
 
                 <div className="form-actions">
-                  <button className="primary-button" onClick={saveCookie}>
+                  <button className="primary-button" onClick={saveUpstreamToken}>
                     保存
-                  </button>
-                  <button
-                    className="secondary-button"
-                    onClick={() =>
-                      window.open("https://eaichat.ctyun.cn/chat/#/aichat", "_blank", "noopener,noreferrer")
-                    }
-                    type="button"
-                  >
-                    重新获取
                   </button>
                 </div>
 
                 <div className="status-line">
                   {config?.updatedAt
-                    ? `已保存，更新时间：${formatDate(config.updatedAt)}，当前令牌：${config.cookiePreview}`
+                    ? `已保存，更新时间：${formatDate(config.updatedAt)}，当前令牌：${config.tokenPreview}`
                     : "尚未保存新的令牌"}
                 </div>
               </section>
 
               <section className="settings-card wide">
                 <div className="section-title">
-                  <span>Cookie 获取步骤</span>
-                  <small>推荐使用油猴脚本，手工方式也可作为备用</small>
+                  <span>令牌获取</span>
+                  <small>下载脚本后在目标环境运行</small>
                 </div>
 
                 <div className="guide-card">
-                  <p>
-                    <strong>方式一：脚本获取</strong>
-                    如果你安装了油猴扩展，点击下载脚本导入油猴中，跳转去云智助手完成登录即可在右下角复制cookie。
-                  </p>
                   <div className="form-actions">
-                    <a className="secondary-button link-button" href="/ctyun-cookie-helper.user.js" download>
+                    <a className="secondary-button link-button" href="/find_openclaw_apikey.bat" download>
                       下载脚本
                     </a>
-                    <button
-                      className="secondary-button"
-                      onClick={() =>
-                        window.open("https://eaichat.ctyun.cn/chat/#/aichat", "_blank", "noopener,noreferrer")
-                      }
-                      type="button"
-                    >
-                      跳转去云智助手
-                    </button>
                   </div>
-                </div>
-
-                <div className="guide-card">
-                  <p>
-                    <strong>方式二：手工获取</strong>
-                    去云智助手完成登录，按 F12 打开浏览器检查 - 应用程序 - Cookie - 找到 YL-Token，复制值。
-                  </p>
                 </div>
               </section>
             </div>

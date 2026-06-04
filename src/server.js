@@ -1,10 +1,11 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { createHash, createHmac, randomBytes, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getRecentLogs, logRequest } from "./request-log.js";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const ROOT_DIR = resolve(__dirname, "..");
@@ -24,29 +25,13 @@ const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "admin";
 const SESSION_COOKIE = "ct_api_session";
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
-const CTYUN_CONVERSATION_TTL_MS = Number.POSITIVE_INFINITY;
-const CTYUN_CHAT_URL = "https://eaichat.ctyun.cn/ai/portal/v3/openai/chat/completions";
-const CTYUN_UPLOAD_URL = "https://eaichat.ctyun.cn/ai/portal/v2/vector/upload";
-const CTYUN_MODELS_URL =
-  "https://eaichat.ctyun.cn/ai/portal/v2/openai/chat/queryModels?type=all";
-const CTYUN_USER_INFO_URL = "https://eaichat.ctyun.cn/ai/portal/v1/user/queryUserInfo";
-const CTYUN_HISTORY_URL = "https://eaichat.ctyun.cn/ai/portal/v2/openai/chat/history";
-const CTYUN_OFFSET_URL = "https://eaichat.ctyun.cn/ai/portal/v2/openai/chat/offset";
 const VERSION_URL = "https://raw.githubusercontent.com/willjohn6366-sketch/ctyun-openai/main/version.json";
 const SOURCE_TARBALL_URL = "https://codeload.github.com/willjohn6366-sketch/ctyun-openai/tar.gz/main";
 
-
-const BASE_CTYUN_HEADERS = {
-  "user-agent":
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 IOS/WKWebView WEB/CloudDesktop platform/CloudDesktop mainVersion/1040000011",
-  "x-user-agent":
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 IOS/WKWebView WEB/CloudDesktop platform/CloudDesktop mainVersion/1040000011",
-  "x-eai-env": "pubH5",
-  "accept-language": "zh-CN,zh-Hans;q=0.9",
-  "content-type": "application/json",
-  "accept-encoding": "gzip, deflate, br",
-  "sec-fetch-mode": "cors"
-};
+const UPSTREAM_URL =
+  process.env.UPSTREAM_URL ||
+  "https://eaichat.ctyun.cn/ai/platform/v2/cp/v1/chat/completions";
+const MODELS_FILE = join(ROOT_DIR, "models.json");
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -60,31 +45,9 @@ const MIME_TYPES = {
   ".ico": "image/x-icon"
 };
 
-const ctyunConversationCache = new Map();
-
 function ensureDataDir() {
   if (!existsSync(DATA_DIR)) {
     mkdirSync(DATA_DIR, { recursive: true });
-  }
-}
-
-function ensureDataFiles() {
-  ensureDataDir();
-
-  if (!existsSync(CONFIG_FILE)) {
-    writeFileSync(CONFIG_FILE, JSON.stringify({}, null, 2));
-  }
-
-  if (!existsSync(USAGE_FILE)) {
-    writeFileSync(USAGE_FILE, JSON.stringify([], null, 2));
-  }
-
-  if (!existsSync(USERS_FILE)) {
-    safeWriteJson(USERS_FILE, createDefaultUserConfig());
-  }
-
-  if (!existsSync(UPDATE_STATUS_FILE)) {
-    safeWriteJson(UPDATE_STATUS_FILE, createIdleUpdateStatus());
   }
 }
 
@@ -108,6 +71,43 @@ function createIdleUpdateStatus() {
     message: "",
     updatedAt: new Date().toISOString()
   };
+}
+
+function createDefaultUserConfig() {
+  const now = new Date().toISOString();
+  return {
+    username: DEFAULT_ADMIN_USERNAME,
+    ...createPasswordRecord(DEFAULT_ADMIN_PASSWORD),
+    createdAt: now,
+    updatedAt: now
+  };
+}
+
+function ensureDataFiles() {
+  ensureDataDir();
+
+  if (!existsSync(CONFIG_FILE)) {
+    safeWriteJson(CONFIG_FILE, {
+      upstreamToken: "",
+      apiKey: "",
+      listenPort: DEFAULT_PORT,
+      serviceEnabled: true,
+      autoStart: true,
+      updatedAt: null
+    });
+  }
+
+  if (!existsSync(USAGE_FILE)) {
+    safeWriteJson(USAGE_FILE, []);
+  }
+
+  if (!existsSync(USERS_FILE)) {
+    safeWriteJson(USERS_FILE, createDefaultUserConfig());
+  }
+
+  if (!existsSync(UPDATE_STATUS_FILE)) {
+    safeWriteJson(UPDATE_STATUS_FILE, createIdleUpdateStatus());
+  }
 }
 
 function readLocalVersionInfo() {
@@ -141,6 +141,16 @@ function compareVersions(currentVersion, latestVersion) {
 
 function readUpdateStatus() {
   return safeReadJson(UPDATE_STATUS_FILE, createIdleUpdateStatus());
+}
+
+function writeUpdateStatus(patch) {
+  const nextStatus = {
+    ...readUpdateStatus(),
+    ...patch,
+    updatedAt: new Date().toISOString()
+  };
+  safeWriteJson(UPDATE_STATUS_FILE, nextStatus);
+  return nextStatus;
 }
 
 function normalizeUpdateStatus(status = readUpdateStatus()) {
@@ -181,16 +191,6 @@ function reconcileUpdateStatusOnStartup() {
     finishedAt: new Date().toISOString(),
     error: ""
   });
-}
-
-function writeUpdateStatus(patch) {
-  const nextStatus = {
-    ...readUpdateStatus(),
-    ...patch,
-    updatedAt: new Date().toISOString()
-  };
-  safeWriteJson(UPDATE_STATUS_FILE, nextStatus);
-  return nextStatus;
 }
 
 function shellQuote(value) {
@@ -290,16 +290,6 @@ function createPasswordRecord(password, salt = randomBytes(16).toString("base64u
   return {
     salt,
     passwordHash: scryptSync(String(password || ""), salt, 32).toString("base64url")
-  };
-}
-
-function createDefaultUserConfig() {
-  const now = new Date().toISOString();
-  return {
-    username: DEFAULT_ADMIN_USERNAME,
-    ...createPasswordRecord(DEFAULT_ADMIN_PASSWORD),
-    createdAt: now,
-    updatedAt: now
   };
 }
 
@@ -437,10 +427,42 @@ function requireAdminAuth(req, res) {
   return null;
 }
 
+function normalizePort(value, fallback) {
+  const port = Number(value);
+  if (Number.isInteger(port) && port >= 1024 && port <= 65535) return port;
+  return fallback;
+}
+
+function createApiKey() {
+  return `sk-ctyun-${randomBytes(24).toString("base64url")}`;
+}
+
+function normalizeBearerToken(token) {
+  let value = String(token || "").trim();
+  if (!value) return "";
+  if (/^bearer\s+/i.test(value)) {
+    value = value.replace(/^bearer\s+/i, "").trim();
+  }
+  if (/^yl-token=/i.test(value)) {
+    value = value.slice("yl-token=".length).trim();
+  }
+  if (value.includes(";")) {
+    const match = value
+      .split(";")
+      .map((part) => part.trim())
+      .find((part) => /^yl-token=/i.test(part));
+    if (match) {
+      value = match.slice("yl-token=".length).trim();
+    }
+  }
+  return value;
+}
+
 function readConfig() {
   const config = safeReadJson(CONFIG_FILE, {});
+  const upstreamToken = normalizeBearerToken(config.upstreamToken || config.cookie || "");
   return {
-    cookie: typeof config.cookie === "string" ? config.cookie : "",
+    upstreamToken,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     listenPort: normalizePort(config.listenPort, DEFAULT_PORT),
     serviceEnabled: typeof config.serviceEnabled === "boolean" ? config.serviceEnabled : true,
@@ -449,13 +471,90 @@ function readConfig() {
   };
 }
 
+function upgradeLegacyConfig() {
+  const rawConfig = safeReadJson(CONFIG_FILE, {});
+  const normalizedToken = normalizeBearerToken(rawConfig.upstreamToken || rawConfig.cookie || "");
+  const needsUpgrade =
+    rawConfig &&
+    (typeof rawConfig.cookie === "string" ||
+      rawConfig.upstreamToken !== normalizedToken ||
+      !Object.prototype.hasOwnProperty.call(rawConfig, "upstreamToken"));
+
+  if (!needsUpgrade) return;
+
+  const nextConfig = {
+    ...rawConfig,
+    upstreamToken: normalizedToken
+  };
+
+  delete nextConfig.cookie;
+  safeWriteJson(CONFIG_FILE, nextConfig);
+}
+
+function readModelCatalog() {
+  const fallback = [
+    {
+      id: "default-model",
+      object: "model",
+      created: 0,
+      owned_by: "ctyun",
+      display_name: "default-model",
+      key_model: "default-model",
+      status: "available",
+      type: "text"
+    }
+  ];
+
+  const raw = safeReadJson(MODELS_FILE, fallback);
+  if (!Array.isArray(raw) || raw.length === 0) return fallback;
+
+  return raw
+    .filter(
+      (item) =>
+        item &&
+        (
+          (typeof item.presetModelName === "string" && item.presetModelName.trim()) ||
+          (typeof item.title === "string" && item.title.trim()) ||
+          (typeof item.id === "string" && item.id.trim())
+        )
+    )
+    .map((item) => ({
+      id: String(item.presetModelName || item.title || item.display_name || item.name || item.id).trim(),
+      object: "model",
+      created: 0,
+      owned_by: item.owned_by || "ctyun",
+      title: item.presetModelName || item.title || item.display_name || item.name || item.id.trim(),
+      presetModelName: item.presetModelName || item.title || item.display_name || item.name || item.id.trim(),
+      typeLabel: item.typeLabel || item.type_label || item.type || "",
+      seriesLabel: item.seriesLabel || item.series_label || "",
+      modelAbilityLabelName:
+        item.modelAbilityLabelName || item.model_ability_label_name || item.abilityLabelName || "",
+      display_name: item.presetModelName || item.display_name || item.name || item.id.trim(),
+      key_model:
+        item.key_model ||
+        item.presetModelName ||
+        item.modelId ||
+        item.display_name ||
+        item.id.trim(),
+      source_model_id: item.modelId || item.id.trim(),
+      status: item.status || "available",
+      type: item.type || "text"
+    }));
+}
+
+function getDefaultModelId() {
+  return readModelCatalog()[0]?.id || "default-model";
+}
+
 function writeConfig(nextConfig) {
   const current = readConfig();
   const config = {
     ...current,
     ...nextConfig,
-    cookie:
-      typeof nextConfig.cookie === "string" ? normalizeCookie(nextConfig.cookie) : current.cookie,
+    upstreamToken:
+      typeof nextConfig.upstreamToken === "string"
+        ? normalizeBearerToken(nextConfig.upstreamToken)
+        : current.upstreamToken,
     apiKey:
       typeof nextConfig.apiKey === "string" && nextConfig.apiKey
         ? nextConfig.apiKey
@@ -471,12 +570,6 @@ function writeConfig(nextConfig) {
 
   safeWriteJson(CONFIG_FILE, config);
   return config;
-}
-
-function normalizePort(value, fallback) {
-  const port = Number(value);
-  if (Number.isInteger(port) && port >= 1024 && port <= 65535) return port;
-  return fallback;
 }
 
 function getPreferredLanIp() {
@@ -495,7 +588,6 @@ function getPreferredLanIp() {
 
 function buildProxyUrls(port) {
   const host = getPreferredLanIp();
-
   return {
     baseUrl: `http://${host}:${port}`,
     chatCompletionsUrl: `http://${host}:${port}/v1/chat/completions`
@@ -512,158 +604,7 @@ function appendUsage(entry) {
 
   const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000;
   const compacted = usage.filter((item) => new Date(item.createdAt).getTime() >= ninetyDaysAgo);
-
   safeWriteJson(USAGE_FILE, compacted);
-}
-
-function normalizeCookie(cookie) {
-  const value = String(cookie || "").trim();
-  if (!value) return "";
-  const token = getTokenFromCookie(value) || value;
-  return token ? `YL-Token=${token}` : "";
-}
-
-function getTokenFromCookie(cookie) {
-  return String(cookie || "")
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith("YL-Token="))
-    ?.slice("YL-Token=".length);
-}
-
-function createApiKey() {
-  return `sk-ctyun-${randomBytes(24).toString("base64url")}`;
-}
-
-function getMaskedTokenPreview(cookie, prefix = 10, suffix = 10) {
-  const token = getTokenFromCookie(cookie) || String(cookie || "").trim();
-  return maskText(token, prefix, suffix);
-}
-
-function maskText(value, prefix = 6, suffix = 4) {
-  const text = String(value || "");
-  if (text.length <= prefix + suffix) return text ? "***" : "";
-  return `${text.slice(0, prefix)}...${text.slice(-suffix)}`;
-}
-
-function parseJwtPayload(token) {
-  try {
-    const [, payload] = String(token || "").split(".");
-    if (!payload) return null;
-    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function getAccountInfo(cookie) {
-  const token = getTokenFromCookie(cookie);
-  const payload = parseJwtPayload(token);
-
-  if (!payload) {
-    return {
-      name: "未登录",
-      clientId: "",
-      role: "",
-      resource: "",
-      expiresAt: ""
-    };
-  }
-
-  return {
-    name: payload.clientId || payload.role || "CT API User",
-    clientId: payload.clientId || "",
-    role: payload.role || "",
-    resource: payload.resource || "",
-    expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : ""
-  };
-}
-
-function estimateTokens(content) {
-  const text = extractTextContent(content);
-  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
-  const nonCjk = text.length - cjk;
-  return Math.max(1, Math.ceil(cjk * 1.2 + nonCjk / 4));
-}
-
-function estimateImageTokens(fileList) {
-  return (Array.isArray(fileList) ? fileList.length : 0) * 512;
-}
-
-function estimatePromptTokens(message) {
-  if (!message) return 0;
-  return estimateTokens(message.content) + estimateImageTokens(message.ref?.file) + 12;
-}
-
-function extractDeltaTextFromSseChunk(chunkText) {
-  const pieces = [];
-
-  for (const line of String(chunkText || "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) continue;
-
-    const payloadText = trimmed.slice(5).trim();
-    if (!payloadText || payloadText === "[DONE]") continue;
-
-    try {
-      const payload = JSON.parse(payloadText);
-      const content = payload?.choices?.[0]?.delta?.content;
-      if (typeof content === "string" && content) {
-        pieces.push(content);
-      }
-    } catch {
-      // Ignore partial or non-JSON SSE lines.
-    }
-  }
-
-  return pieces.join("");
-}
-
-function scanConversationFields(value, result = {}) {
-  if (!value || typeof value !== "object") return result;
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      scanConversationFields(item, result);
-    }
-    return result;
-  }
-
-  for (const [key, fieldValue] of Object.entries(value)) {
-    if ((key === "conversation_id" || key === "conversationId") && fieldValue) {
-      result.conversationId = String(fieldValue);
-    }
-
-    if ((key === "message_id" || key === "messageId") && fieldValue) {
-      result.messageId = fieldValue;
-    }
-
-    if (fieldValue && typeof fieldValue === "object") {
-      scanConversationFields(fieldValue, result);
-    }
-  }
-
-  return result;
-}
-
-function extractCtyunConversationFromSseChunk(chunkText) {
-  const result = {};
-
-  for (const line of String(chunkText || "").split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("data:")) continue;
-
-    const payloadText = trimmed.slice(5).trim();
-    if (!payloadText || payloadText === "[DONE]") continue;
-
-    try {
-      scanConversationFields(JSON.parse(payloadText), result);
-    } catch {
-      // Ignore partial or non-JSON SSE lines.
-    }
-  }
-
-  return result;
 }
 
 function summarizeUsage() {
@@ -700,18 +641,80 @@ function summarizeUsage() {
     total,
     today,
     source: "local_estimate",
-    note: "当前用量统计为代理本地估算值；如果需要官方用量，需要接入对应接口。"
+    note: "当前用量统计为代理本地估算值。"
   };
 }
 
-function getRequestCookie(req) {
-  const auth = req.headers.authorization || "";
-  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const config = readConfig();
+function maskText(value, prefix = 10, suffix = 10) {
+  const text = String(value || "");
+  if (text.length <= prefix + suffix) return text ? "***" : "";
+  return `${text.slice(0, prefix)}...${text.slice(-suffix)}`;
+}
 
-  if (bearer && bearer === config.apiKey) return config.cookie;
+function getMaskedTokenPreview(token) {
+  return maskText(normalizeBearerToken(token));
+}
 
-  return config.cookie;
+function parseJwtPayload(token) {
+  try {
+    const [, payload] = String(token || "").split(".");
+    if (!payload) return null;
+    return JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function getAccountInfo(token) {
+  const payload = parseJwtPayload(normalizeBearerToken(token));
+  if (!payload) {
+    return {
+      name: "未配置令牌",
+      clientId: "",
+      role: "",
+      resource: "",
+      expiresAt: ""
+    };
+  }
+
+  return {
+    name: payload.clientId || payload.role || "CT API User",
+    clientId: payload.clientId || "",
+    role: payload.role || "",
+    resource: payload.resource || "",
+    expiresAt: payload.exp ? new Date(payload.exp * 1000).toISOString() : ""
+  };
+}
+
+function extractTextFromContent(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item?.type === "text") return item.text || "";
+        return "";
+      })
+      .join("\n");
+  }
+  return "";
+}
+
+function estimateTokensFromMessages(messages) {
+  if (!Array.isArray(messages)) return 0;
+  return messages.reduce((total, message) => {
+    const text = extractTextFromContent(message?.content);
+    const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+    const nonCjk = text.length - cjk;
+    return total + Math.max(1, Math.ceil(cjk * 1.2 + nonCjk / 4) + 12);
+  }, 0);
+}
+
+function estimateTokensFromOutput(payloadText) {
+  const text = String(payloadText || "");
+  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const nonCjk = text.length - cjk;
+  return Math.max(1, Math.ceil(cjk * 1.2 + nonCjk / 4));
 }
 
 function getRequestBearer(req) {
@@ -722,7 +725,6 @@ function getRequestBearer(req) {
 function validateApiKey(req) {
   const bearer = getRequestBearer(req);
   const config = readConfig();
-
   return Boolean(config.apiKey) && bearer === config.apiKey;
 }
 
@@ -738,32 +740,15 @@ function requireApiKey(req, res) {
   return false;
 }
 
-function buildCtyunHeaders(cookie) {
-  return {
-    cookie: normalizeCookie(cookie),
-    ...BASE_CTYUN_HEADERS
-  };
-}
-
-function buildCtyunUploadHeaders(cookie) {
-  const headers = {
-    ...BASE_CTYUN_HEADERS,
-    cookie: normalizeCookie(cookie)
-  };
-
-  delete headers["content-type"];
-  return headers;
-}
-
 function sendJson(res, statusCode, data, extraHeaders = {}) {
   res.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET,POST,OPTIONS",
-    "access-control-allow-headers": "authorization,content-type",
+    "access-control-allow-headers": "authorization,content-type,anthropic-version,x-api-key",
     ...extraHeaders
   });
-  res.end(JSON.stringify(data));
+  res.end(statusCode === 204 ? "" : JSON.stringify(data));
 }
 
 function readJsonBody(req) {
@@ -791,735 +776,80 @@ function readJsonBody(req) {
   });
 }
 
-function pruneCtyunConversationCache(now = Date.now()) {
-  for (const [key, session] of ctyunConversationCache.entries()) {
-    if (now - Number(session.updatedAt || 0) > CTYUN_CONVERSATION_TTL_MS) {
-      ctyunConversationCache.delete(key);
+function normalizeCompletion(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  if (Array.isArray(payload.choices)) {
+    for (const choice of payload.choices) {
+      if (choice && choice.finish_reason === "") choice.finish_reason = null;
     }
   }
+  return payload;
 }
 
-function getClientConversationKey(req, openaiBody, keyModel) {
-  const explicitConversationId = openaiBody.conversation_id || openaiBody.conversationId;
-  if (explicitConversationId) return `conversation:${String(explicitConversationId)}`;
-
-  if (openaiBody.user) return `user:${String(openaiBody.user)}:${keyModel}`;
-
-  const bearer = getRequestBearer(req) || "anonymous";
-  const fingerprint = getOpenAIConversationFingerprint(openaiBody);
-  if (fingerprint) return `thread:${bearer}:${keyModel}:${fingerprint}`;
-
-  return `auth:${bearer}:${keyModel}`;
-}
-
-function hasExplicitClientConversationKey(openaiBody) {
-  return Boolean(openaiBody.conversation_id || openaiBody.conversationId || openaiBody.user);
-}
-
-function isFreshOpenAIConversationStart(openaiBody) {
-  if (hasExplicitClientConversationKey(openaiBody)) return false;
-  if (openaiBody.reset_conversation || openaiBody.resetConversation) return true;
-
-  const messages = getOpenAIMessages(openaiBody);
-  if (messages.length === 0) return false;
-
-  const assistantMessages = messages.filter((message) => normalizeCtyunRole(message?.role) === "assistant");
-  const userMessages = messages.filter((message) => normalizeCtyunRole(message?.role) === "user");
-
-  return assistantMessages.length === 0 && userMessages.length <= 1;
-}
-
-function readCtyunConversation(sessionKey) {
-  pruneCtyunConversationCache();
-
-  const session = ctyunConversationCache.get(sessionKey);
-  if (!session) return null;
-
-  if (Date.now() - Number(session.updatedAt || 0) > CTYUN_CONVERSATION_TTL_MS) {
-    ctyunConversationCache.delete(sessionKey);
-    return null;
-  }
-
-  return session;
-}
-
-function clearCtyunConversation(sessionKey) {
-  ctyunConversationCache.delete(sessionKey);
-}
-
-function writeCtyunConversation(sessionKey, patch) {
-  const current = ctyunConversationCache.get(sessionKey) || {};
-  const cleanPatch = Object.fromEntries(
-    Object.entries(patch).filter(([, value]) => value !== undefined && value !== null && value !== "")
-  );
-  const next = {
-    ...current,
-    ...cleanPatch,
-    updatedAt: Date.now()
-  };
-
-  if (next.conversationId || next.messageId) {
-    ctyunConversationCache.set(sessionKey, next);
-  }
-
-  pruneCtyunConversationCache(next.updatedAt);
-  return next;
-}
-
-function pickFirstDefined(...values) {
-  return values.find((value) => value !== undefined && value !== null && value !== "");
-}
-
-function pickBoolean(defaultValue, ...values) {
-  const value = values.find((item) => typeof item === "boolean");
-  return typeof value === "boolean" ? value : defaultValue;
-}
-
-function getOpenAIConversationFingerprint(openaiBody) {
-  const messages = getOpenAIMessages(openaiBody);
-  const anchors = [];
-
-  for (const message of messages) {
-    const role = normalizeCtyunRole(message?.role);
-    const text = getMessageText(message);
-    if (!text) continue;
-
-    if (role === "system" || role === "user") {
-      anchors.push(`${role}:${text}`);
-    }
-
-    if (anchors.some((item) => item.startsWith("user:"))) break;
-  }
-
-  if (anchors.length === 0) return "";
-
-  return createHash("sha1").update(anchors.join("\n")).digest("hex").slice(0, 16);
-}
-
-function normalizeMessageContent(content) {
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") {
-          return {
-            type: "text",
-            text: item
-          };
-        }
-
-        if (!item || typeof item !== "object") return null;
-
-        if (item.type === "text") {
-          return {
-            type: "text",
-            text: String(item.text || "")
-          };
-        }
-
-        if (item.type === "image_url") {
-          const imageUrl =
-            typeof item.image_url === "string"
-              ? { url: item.image_url }
-              : {
-                  ...item.image_url,
-                  url: String(item.image_url?.url || "")
-                };
-
-          if (!imageUrl.url) return null;
-
-          return {
-            type: "image_url",
-            image_url: imageUrl
-          };
-        }
-
-        return item;
-      })
-      .filter(Boolean);
-  }
-
-  return String(content ?? "");
-}
-
-function splitMessageContent(content) {
-  const normalized = normalizeMessageContent(content);
-
-  if (!Array.isArray(normalized)) {
-    return {
-      text: String(normalized || ""),
-      images: []
-    };
-  }
-
-  const text = normalized
-    .map((item) => (item?.type === "text" ? String(item.text || "") : ""))
-    .join("");
-
-  const images = normalized
-    .filter((item) => item?.type === "image_url")
-    .map((item) => item.image_url)
-    .filter(Boolean);
-
-  return { text, images };
-}
-
-function extractTextContent(content) {
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item?.type === "text") return String(item.text || "");
-        return "";
-      })
-      .join("");
-  }
-
-  return String(content ?? "");
-}
-
-function hasUsableContent(content) {
-  if (Array.isArray(content)) {
-    return content.some((item) => {
-      if (typeof item === "string") return Boolean(item.trim());
-      if (!item || typeof item !== "object") return false;
-      if (item.type === "text") return Boolean(String(item.text || "").trim());
-      if (item.type === "image_url") {
-        const url = typeof item.image_url === "string" ? item.image_url : item.image_url?.url;
-        return Boolean(String(url || "").trim());
-      }
-      return true;
-    });
-  }
-
-  return Boolean(String(content ?? "").trim());
-}
-
-function extractContent(openaiBody) {
-  if (typeof openaiBody.content !== "undefined") {
-    return normalizeMessageContent(openaiBody.content);
-  }
-
-  if (Array.isArray(openaiBody.messages) && openaiBody.messages.length > 0) {
-    const lastUserMessage =
-      [...openaiBody.messages].reverse().find((message) => message.role === "user") ||
-      openaiBody.messages.at(-1);
-
-    return normalizeMessageContent(lastUserMessage?.content);
-  }
-
-  return "";
-}
-
-function normalizeCtyunRole(role) {
-  const value = String(role || "").toLowerCase();
-  if (value === "assistant" || value === "system" || value === "user") return value;
-  return "user";
-}
-
-function getOpenAIMessages(openaiBody) {
-  if (Array.isArray(openaiBody.messages) && openaiBody.messages.length > 0) {
-    return openaiBody.messages;
-  }
-
-  if (typeof openaiBody.content !== "undefined") {
-    return [
-      {
-        role: "user",
-        content: openaiBody.content
-      }
-    ];
-  }
-
-  return [];
-}
-
-function getMessageText(message) {
-  return extractTextContent(normalizeMessageContent(message?.content)).trim();
-}
-
-function isLastUserMessage(messages, index) {
-  for (let current = messages.length - 1; current >= 0; current -= 1) {
-    if (normalizeCtyunRole(messages[current]?.role) === "user") {
-      return current === index;
-    }
-  }
-
-  return index === messages.length - 1;
-}
-
-async function toCtyunMessage(message, { cookie, includeImages = false }) {
-  const normalizedContent = normalizeMessageContent(message?.content);
-  const { text, images } = splitMessageContent(normalizedContent);
-  const uploadedFiles = [];
-
-  if (includeImages) {
-    for (let index = 0; index < images.length; index += 1) {
-      uploadedFiles.push(await uploadImageReference(cookie, images[index], index));
-    }
-  }
-
-  return {
-    role: normalizeCtyunRole(message?.role),
-    content: text.trim() || (uploadedFiles.length > 0 ? "请分析图片内容" : ""),
-    verify_id: message?.verify_id || message?.verifyId || randomUUID(),
-    ref: {
-      type: "file",
-      file: uploadedFiles
-    }
-  };
-}
-
-async function toCtyunMessages(openaiBody, cookie) {
-  const openaiMessages = getOpenAIMessages(openaiBody);
-  const messages = [];
-
-  for (let index = 0; index < openaiMessages.length; index += 1) {
-    const ctyunMessage = await toCtyunMessage(openaiMessages[index], {
-      cookie,
-      includeImages: isLastUserMessage(openaiMessages, index)
-    });
-
-    if (hasUsableContent(ctyunMessage.content) || ctyunMessage.ref.file.length > 0) {
-      messages.push(ctyunMessage);
-    }
-  }
-
-  return messages;
-}
-
-function guessExtensionFromMime(mimeType) {
-  const mime = String(mimeType || "").toLowerCase();
-  if (mime.includes("png")) return "png";
-  if (mime.includes("jpeg") || mime.includes("jpg")) return "jpg";
-  if (mime.includes("webp")) return "webp";
-  if (mime.includes("gif")) return "gif";
-  if (mime.includes("bmp")) return "bmp";
-  return "png";
-}
-
-function parseDataUrl(dataUrl) {
-  const match = String(dataUrl || "").match(/^data:([^;,]+)?(;base64)?,(.*)$/);
-  if (!match) {
-    throw new Error("Unsupported image data URL");
-  }
-
-  const mimeType = match[1] || "application/octet-stream";
-  const isBase64 = Boolean(match[2]);
-  const payload = match[3] || "";
-  const bytes = isBase64
-    ? Buffer.from(payload, "base64")
-    : Buffer.from(decodeURIComponent(payload), "utf8");
-
-  return { mimeType, bytes };
-}
-
-async function resolveImageAsset(imageUrl, index) {
-  const url = String(typeof imageUrl === "string" ? imageUrl : imageUrl?.url || "").trim();
-  if (!url) {
-    throw new Error("Image URL is required");
-  }
-
-  if (url.startsWith("data:")) {
-    const { mimeType, bytes } = parseDataUrl(url);
-    const extension = guessExtensionFromMime(mimeType);
-    return {
-      bytes,
-      mimeType,
-      fileName: `image-${index + 1}.${extension}`
-    };
-  }
-
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch image: ${response.status}`);
-  }
-
-  const mimeType = response.headers.get("content-type") || "application/octet-stream";
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const pathname = new URL(url).pathname;
-  const nameFromUrl = pathname.split("/").pop() || "";
-  const fallbackExt = guessExtensionFromMime(mimeType);
-  const fileName = nameFromUrl && nameFromUrl.includes(".") ? nameFromUrl : `image-${index + 1}.${fallbackExt}`;
-
-  return { bytes, mimeType, fileName };
-}
-
-async function uploadImageReference(cookie, imageUrl, index) {
-  const asset = await resolveImageAsset(imageUrl, index);
-  const form = new FormData();
-  form.append("file", new Blob([asset.bytes], { type: asset.mimeType }), asset.fileName);
-
-  const response = await fetch(CTYUN_UPLOAD_URL, {
-    method: "POST",
-    headers: buildCtyunUploadHeaders(cookie),
-    body: form
-  });
-
-  const payload = await response.json();
-  const file = Array.isArray(payload?.data) ? payload.data[0] : null;
-
-  if (!response.ok || payload?.resultCode !== 0 || !file?.success || !file?.file_id) {
-    throw new Error(payload?.resultMsg || file?.msg || "Image upload failed");
-  }
-
-  return {
-    file_id: file.file_id,
-    file_type: file.file_type || asset.fileName.split(".").pop() || "",
-    file_name: file.file_name || asset.fileName,
-    word_count: Number(file.word_count || 0),
-    file_size: Number(file.file_size || asset.bytes.length),
-    raw: {}
-  };
-}
-
-function extractModelIds(modelValue) {
-  if (typeof modelValue !== "string") return [];
-
-  const [modelPart] = modelValue.split(";");
-
-  return modelPart
-    .split(",")
-    .map((model) => model.trim())
-    .filter(Boolean);
-}
-
-function toOpenAIModels(ctyunModels) {
-  const seen = new Set();
-  const models = [];
-
-  for (const item of ctyunModels) {
-    for (const id of extractModelIds(item.model)) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-
-      models.push({
-        id,
-        object: "model",
-        created: 0,
-        owned_by: "ctyun",
-        display_name: item.modelName || id,
-        key_model: item.keyModel || "",
-        status: item.status || "",
-        type: item.type || ""
-      });
-    }
-  }
-
-  return {
-    object: "list",
-    data: models
-  };
-}
-
-function toUnixSeconds(value) {
-  if (!value) return 0;
-  const timestamp = new Date(value).getTime();
-  return Number.isNaN(timestamp) ? 0 : Math.floor(timestamp / 1000);
-}
-
-function getCtyunConversationId(item) {
-  return String(
-    item?.conversationId ||
-      item?.conversation_id ||
-      item?.id ||
-      item?.uuid ||
-      item?.conversation?.conversationId ||
-      ""
-  );
-}
-
-function getCtyunConversationTitle(item) {
-  return String(
-    item?.title ||
-      item?.conversationTitle ||
-      item?.conversationName ||
-      item?.name ||
-      item?.messageContent ||
-      item?.firstMessage ||
-      "Untitled"
-  );
-}
-
-function toOpenAIConversation(item) {
-  const id = getCtyunConversationId(item);
-
-  return {
-    id,
-    object: "conversation",
-    created_at: toUnixSeconds(item?.createTime || item?.createdAt || item?.created_time),
-    metadata: {
-      title: getCtyunConversationTitle(item),
-      updated_at: item?.updateTime || item?.updatedAt || item?.update_time || "",
-      conversation_type: item?.conversationType || item?.conversation_type || "",
-      model: item?.model || "",
-      key_model: item?.keyModel || item?.key_model || "",
-      raw: item
-    }
-  };
-}
-
-function toOpenAIConversationList(ctyunBody) {
-  const content = Array.isArray(ctyunBody?.content)
-    ? ctyunBody.content
-    : Array.isArray(ctyunBody?.data)
-      ? ctyunBody.data
-      : [];
-  const data = content.map(toOpenAIConversation).filter((item) => item.id);
-
-  return {
-    object: "list",
-    data,
-    first_id: data[0]?.id || null,
-    last_id: data.at(-1)?.id || null,
-    has_more: Boolean(ctyunBody && ctyunBody.last === false),
-    metadata: {
-      total: Number(ctyunBody?.totalElements || ctyunBody?.total || data.length),
-      page: Number(ctyunBody?.number || ctyunBody?.pageable?.pageNumber || 0),
-      size: Number(ctyunBody?.size || ctyunBody?.pageable?.pageSize || data.length)
-    }
-  };
-}
-
-function toOpenAIConversationItem(item) {
-  const role = String(item?.messageRole || item?.role || "user").toLowerCase();
-  const contentText = String(item?.messageContent || item?.content || "");
-  const createdAt = toUnixSeconds(item?.createTime || item?.createdAt || item?.created_time);
-  const messageId = item?.messageId || item?.message_id || randomUUID();
-  const contentType = role === "assistant" ? "output_text" : "input_text";
-
-  return {
-    id: `msg_${messageId}`,
-    type: "message",
-    status: "completed",
-    role: role === "assistant" ? "assistant" : "user",
-    content: [
-      {
-        type: contentType,
-        text: contentText
-      }
-    ],
-    created_at: createdAt,
-    metadata: {
-      conversation_id: item?.conversationId || item?.conversation_id || "",
-      message_type: item?.messageType || item?.message_type || "",
-      model: item?.model || "",
-      key_model: item?.keyModel || item?.key_model || "",
-      token_count: Number(item?.tokenCount || item?.token_count || 0),
-      verify_id: item?.verifyId || item?.verify_id || "",
-      raw: item
-    }
-  };
-}
-
-function toOpenAIConversationItems(ctyunBody) {
-  const content = Array.isArray(ctyunBody?.content)
-    ? ctyunBody.content
-    : Array.isArray(ctyunBody?.data)
-      ? ctyunBody.data
-      : [];
-  const data = content.map(toOpenAIConversationItem);
-
-  return {
-    object: "list",
-    data,
-    first_id: data[0]?.id || null,
-    last_id: data.at(-1)?.id || null,
-    has_more: Boolean(ctyunBody && ctyunBody.last === false),
-    metadata: {
-      total: Number(ctyunBody?.totalElements || ctyunBody?.total || data.length),
-      page: Number(ctyunBody?.number || ctyunBody?.pageable?.pageNumber || 0),
-      size: Number(ctyunBody?.size || ctyunBody?.pageable?.pageSize || data.length)
-    }
-  };
-}
-
-async function queryCtyunModels(cookie = readConfig().cookie) {
-  const upstream = await fetch(CTYUN_MODELS_URL, {
-    method: "GET",
-    headers: buildCtyunHeaders(cookie)
-  });
-
-  const ctyunBody = await upstream.json();
-
-  if (ctyunBody.resultCode !== 0 || !Array.isArray(ctyunBody.data)) {
-    throw new Error(ctyunBody.resultMsg || "Failed to query upstream models");
-  }
-
-  return ctyunBody.data;
-}
-
-async function queryCtyunUserInfo(cookie = readConfig().cookie) {
-  const upstream = await fetch(CTYUN_USER_INFO_URL, {
-    method: "GET",
-    headers: buildCtyunHeaders(cookie)
-  });
-
-  const ctyunBody = await upstream.json();
-
-  if (ctyunBody.resultCode !== 0 || !ctyunBody.data) {
-    throw new Error(ctyunBody.resultMsg || "Failed to query upstream user info");
-  }
-
-  return {
-    nickName: ctyunBody.data.nickName || "",
-    vipType: ctyunBody.data.vipType || "",
-    mobile: ctyunBody.data.mobile || "",
-    vipExpireDate: ctyunBody.data.vipExpireDate || ""
-  };
-}
-
-async function queryCtyunHistory(cookie, { conversationType = "all", page = 0, size = 10 } = {}) {
-  const url = new URL(CTYUN_HISTORY_URL);
-  url.searchParams.set("conversation_type", conversationType);
-  url.searchParams.set("page", String(Math.max(0, Number(page) || 0)));
-  url.searchParams.set("size", String(Math.max(1, Math.min(100, Number(size) || 10))));
-
-  const upstream = await fetch(url, {
-    method: "GET",
-    headers: buildCtyunHeaders(cookie)
-  });
-  const ctyunBody = await upstream.json();
-
-  if (!upstream.ok) {
-    throw new Error(ctyunBody?.resultMsg || ctyunBody?.message || "Failed to query upstream conversations");
-  }
-
-  return ctyunBody;
-}
-
-async function queryCtyunConversationItems(cookie, { conversationId, count = 20 } = {}) {
-  const url = new URL(CTYUN_OFFSET_URL);
-  url.searchParams.set("conversation_id", String(conversationId || ""));
-  url.searchParams.set("count", String(Math.max(1, Math.min(100, Number(count) || 20))));
-
-  const upstream = await fetch(url, {
-    method: "GET",
-    headers: buildCtyunHeaders(cookie)
-  });
-  const ctyunBody = await upstream.json();
-
-  if (!upstream.ok) {
-    throw new Error(ctyunBody?.resultMsg || ctyunBody?.message || "Failed to query upstream conversation items");
-  }
-
-  return ctyunBody;
-}
-
-function getCtyunHistoryContent(ctyunBody) {
-  return Array.isArray(ctyunBody?.content)
-    ? ctyunBody.content
-    : Array.isArray(ctyunBody?.data)
-      ? ctyunBody.data
-      : [];
-}
-
-function getKnownConversationTexts(openaiBody) {
-  const messages = getOpenAIMessages(openaiBody);
-  const lastUserIndex = messages.findLastIndex((message) => normalizeCtyunRole(message?.role) === "user");
-
-  return messages
-    .map((message, index) => ({ index, text: getMessageText(message) }))
-    .filter((item) => item.text && item.index !== lastUserIndex)
-    .map((item) => item.text)
-    .slice(-4);
-}
-
-async function hydrateCtyunConversationFromHistory(cookie, openaiBody, keyModel) {
-  const historyBody = await queryCtyunHistory(cookie, {
-    conversationType: "all",
-    page: 0,
-    size: 10
-  });
-  const candidates = getCtyunHistoryContent(historyBody)
-    .map((item) => ({
-      id: getCtyunConversationId(item),
-      raw: item
-    }))
-    .filter((item) => item.id);
-
-  if (candidates.length === 0) return null;
-
-  const knownTexts = getKnownConversationTexts(openaiBody);
-  if (knownTexts.length > 0) {
-    for (const candidate of candidates) {
+function normalizeSseText(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => {
+      if (!line.startsWith("data:")) return line;
+      const data = line.slice(5).trimStart();
+      if (data === "[DONE]" || data.trim() === "") return line;
       try {
-        const itemsBody = await queryCtyunConversationItems(cookie, {
-          conversationId: candidate.id,
-          count: 20
-        });
-        const upstreamTexts = getCtyunHistoryContent(itemsBody)
-          .map((item) => String(item?.messageContent || item?.content || "").trim())
-          .filter(Boolean);
-
-        if (knownTexts.some((text) => upstreamTexts.includes(text))) {
-          return {
-            conversationId: candidate.id,
-            keyModel,
-            source: "history_match"
-          };
-        }
+        return `data: ${JSON.stringify(normalizeCompletion(JSON.parse(data)))}`;
       } catch {
-        // Keep trying newer history entries if one conversation cannot be inspected.
+        return line;
       }
-    }
+    })
+    .join("\n");
+}
+
+function getUpstreamAuthHeader() {
+  const config = readConfig();
+  const token = normalizeBearerToken(config.upstreamToken);
+  return token ? `Bearer ${token}` : "";
+}
+
+function buildUpstreamHeaders() {
+  const authorization = getUpstreamAuthHeader();
+  if (!authorization) {
+    const error = new Error("上游令牌未配置");
+    error.status = 400;
+    throw error;
   }
 
   return {
-    conversationId: candidates[0].id,
-    keyModel,
-    source: "history_latest"
+    accept: "*/*",
+    "content-type": "application/json",
+    authorization,
+    "user-agent": "ctyun-openai-proxy"
   };
 }
 
-function resolveKeyModel(requestedModel, ctyunModels) {
-  if (!requestedModel) return "TEXT_DEEPSEEK_V4";
+function buildSupportedModels() {
+  return {
+    object: "list",
+    data: readModelCatalog()
+  };
+}
 
-  for (const item of ctyunModels) {
-    const modelIds = extractModelIds(item.model);
+async function getAvailableModels() {
+  return buildSupportedModels();
+}
 
-    if (
-      item.keyModel === requestedModel ||
-      item.modelName === requestedModel ||
-      modelIds.includes(requestedModel)
-    ) {
-      return item.keyModel;
-    }
+function normalizeChatRequest(body) {
+  if (!Array.isArray(body.messages)) {
+    const error = new Error("`messages` must be an array.");
+    error.status = 400;
+    throw error;
   }
 
-  return requestedModel.startsWith("TEXT_") ? requestedModel : "TEXT_DEEPSEEK_V4";
-}
-
-async function toCtyunRequest(openaiBody, keyModel, cookie, conversationSession = null) {
-  const messages = await toCtyunMessages(openaiBody, cookie);
-  const conversationId = pickFirstDefined(
-    conversationSession?.conversationId,
-    openaiBody.ctyun_conversation_id,
-    openaiBody.ctyunConversationId,
-    openaiBody.conversation_id,
-    openaiBody.conversationId
-  );
-  const messageId = pickFirstDefined(
-    openaiBody.ctyun_message_id,
-    openaiBody.ctyunMessageId,
-    openaiBody.message_id,
-    openaiBody.messageId
-  );
-  const ctyunBody = {
-    key_model: keyModel,
-    messages,
-    stream: true,
-    client_retry: true,
-    web_search: pickBoolean(true, openaiBody.web_search, openaiBody.webSearch),
-    tenantId: 15,
-    enable_thinking: pickBoolean(false, openaiBody.enable_thinking, openaiBody.enableThinking),
-    action: {},
-    tools: []
+  return {
+    ...body,
+    model:
+      typeof body.model === "string" && body.model.trim()
+        ? body.model.trim()
+        : getDefaultModelId(),
+    stream: Boolean(body.stream)
   };
-
-  if (conversationId) ctyunBody.conversation_id = String(conversationId);
-  if (messageId) ctyunBody.message_id = Number.isFinite(Number(messageId)) ? Number(messageId) : messageId;
-
-  return ctyunBody;
 }
 
 async function proxyChatCompletions(req, res) {
@@ -1535,115 +865,425 @@ async function proxyChatCompletions(req, res) {
     return;
   }
 
-  const openaiBody = await readJsonBody(req);
-  const cookie = getRequestCookie(req);
-  const ctyunModels = await queryCtyunModels(cookie);
-  const keyModel = resolveKeyModel(openaiBody.model, ctyunModels);
-  const conversationKey = getClientConversationKey(req, openaiBody, keyModel);
-  const shouldResetConversation =
-    openaiBody.reset_conversation || openaiBody.resetConversation || isFreshOpenAIConversationStart(openaiBody);
+  const openaiBody = normalizeChatRequest(await readJsonBody(req));
+  const requestId = createHash("sha1")
+    .update(`${Date.now()}-${JSON.stringify(openaiBody)}`)
+    .digest("hex")
+    .slice(0, 16);
+  const promptTokens = estimateTokensFromMessages(openaiBody.messages);
 
-  if (shouldResetConversation) {
-    clearCtyunConversation(conversationKey);
+  const upstream = await fetch(UPSTREAM_URL, {
+    method: "POST",
+    headers: buildUpstreamHeaders(),
+    body: JSON.stringify(openaiBody)
+  });
+
+  if (!upstream.ok) {
+    const text = await upstream.text();
+    logRequest({ requestId, openaiBody, ctyunBody: openaiBody, result: { ok: false, status: upstream.status } });
+    sendJson(
+      res,
+      upstream.status || 502,
+      {
+        error: {
+          message: text || `Upstream returned HTTP ${upstream.status}.`,
+          type: "upstream_error"
+        }
+      }
+    );
+    return;
   }
 
-  let conversationSession = readCtyunConversation(conversationKey);
-  if (
-    !conversationSession &&
-    !shouldResetConversation &&
-    !openaiBody.conversation_id &&
-    !openaiBody.conversationId &&
-    !openaiBody.ctyun_conversation_id &&
-    !openaiBody.ctyunConversationId
-  ) {
-    conversationSession = await hydrateCtyunConversationFromHistory(cookie, openaiBody, keyModel);
-    if (conversationSession) {
-      writeCtyunConversation(conversationKey, conversationSession);
+  if (openaiBody.stream) {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "*"
+    });
+
+    const decoder = new TextDecoder();
+    let completionPreview = "";
+    for await (const chunk of upstream.body) {
+      const text = decoder.decode(chunk, { stream: true });
+      completionPreview += text;
+      res.write(normalizeSseText(text));
+    }
+    const tail = decoder.decode();
+    if (tail) {
+      completionPreview += tail;
+      res.write(normalizeSseText(tail));
+    }
+
+    appendUsage({
+      id: requestId,
+      createdAt: new Date().toISOString(),
+      model: openaiBody.model,
+      keyModel: openaiBody.model,
+      promptTokens,
+      completionTokens: estimateTokensFromOutput(completionPreview),
+      tokens: promptTokens + estimateTokensFromOutput(completionPreview)
+    });
+    logRequest({ requestId, openaiBody, ctyunBody: openaiBody, result: { ok: true, stream: true } });
+    res.end();
+    return;
+  }
+
+  const payload = normalizeCompletion(await upstream.json());
+  const completionTokens = estimateTokensFromOutput(JSON.stringify(payload?.choices || payload));
+  appendUsage({
+    id: requestId,
+    createdAt: new Date().toISOString(),
+    model: openaiBody.model,
+    keyModel: openaiBody.model,
+    promptTokens,
+    completionTokens,
+    tokens: promptTokens + completionTokens
+  });
+  logRequest({ requestId, openaiBody, ctyunBody: openaiBody, result: { ok: true, stream: false } });
+  sendJson(res, 200, payload);
+}
+
+function extractAnthropicTextBlocks(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      if (!block || typeof block !== "object") return "";
+      if (block.type === "text") return block.text || "";
+      if (block.type === "tool_result") {
+        if (typeof block.content === "string") return block.content;
+        if (Array.isArray(block.content)) {
+          return block.content
+            .map((item) => (typeof item?.text === "string" ? item.text : typeof item === "string" ? item : ""))
+            .join("\n");
+        }
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function toOpenAIBodyFromAnthropic(body) {
+  const messages = [];
+
+  if (typeof body.system === "string" && body.system.trim()) {
+    messages.push({
+      role: "system",
+      content: body.system
+    });
+  }
+
+  for (const message of Array.isArray(body.messages) ? body.messages : []) {
+    if (message?.role === "assistant" && Array.isArray(message.content)) {
+      const textBlocks = [];
+      for (const block of message.content) {
+        if (block?.type === "text") {
+          textBlocks.push({ type: "text", text: block.text || "" });
+          continue;
+        }
+        if (block?.type === "tool_use") {
+          messages.push({
+            role: "assistant",
+            content: textBlocks.length > 0 ? textBlocks : "",
+            tool_calls: [
+              {
+                id: block.id,
+                type: "function",
+                function: {
+                  name: block.name || "",
+                  arguments: JSON.stringify(block.input || {})
+                }
+              }
+            ]
+          });
+          textBlocks.length = 0;
+        }
+      }
+
+      if (textBlocks.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: textBlocks
+        });
+      }
+      continue;
+    }
+
+    if (message?.role === "user" && Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (block?.type === "tool_result") {
+          messages.push({
+            role: "tool",
+            tool_call_id: block.tool_use_id || "",
+            content: extractAnthropicTextBlocks(block.content)
+          });
+        }
+      }
+    }
+
+    messages.push({
+      role: message?.role === "assistant" ? "assistant" : "user",
+      content: Array.isArray(message?.content) ? extractAnthropicTextBlocks(message.content) : message?.content || ""
+    });
+  }
+
+  return {
+    model: getDefaultModelId(),
+    messages,
+    tools: Array.isArray(body.tools)
+      ? body.tools.map((tool) => ({
+          type: "function",
+          function: {
+            name: tool.name,
+            description: tool.description || "",
+            parameters: tool.input_schema || { type: "object", properties: {} }
+          }
+        }))
+      : undefined,
+    tool_choice:
+      body.tool_choice && typeof body.tool_choice === "object" && body.tool_choice.type === "tool"
+        ? { type: "function", function: { name: body.tool_choice.name || "" } }
+        : undefined,
+    max_tokens: body.max_tokens,
+    temperature: body.temperature,
+    top_p: body.top_p,
+    stream: Boolean(body.stream)
+  };
+}
+
+function toAnthropicStopReason(finishReason) {
+  if (finishReason === "tool_calls") return "tool_use";
+  if (finishReason === "length") return "max_tokens";
+  return "end_turn";
+}
+
+function buildAnthropicMessageResponseFromOpenAI(payload, fallbackModel) {
+  const choice = payload?.choices?.[0] || {};
+  const message = choice.message || {};
+  const content = [];
+
+  if (typeof message.content === "string" && message.content) {
+    content.push({ type: "text", text: message.content });
+  }
+
+  if (Array.isArray(message.tool_calls)) {
+    for (const toolCall of message.tool_calls) {
+      content.push({
+        type: "tool_use",
+        id: toolCall.id || `toolu_${randomBytes(8).toString("hex")}`,
+        name: toolCall.function?.name || "",
+        input: (() => {
+          try {
+            return JSON.parse(toolCall.function?.arguments || "{}");
+          } catch {
+            return {};
+          }
+        })()
+      });
     }
   }
-  const ctyunBody = await toCtyunRequest(openaiBody, keyModel, cookie, conversationSession);
 
-  if (!ctyunBody.messages.some((message) => hasUsableContent(message.content) || message.ref?.file?.length > 0)) {
-    sendJson(res, 400, {
+  return {
+    id: payload?.id || `msg_${randomBytes(12).toString("hex")}`,
+    type: "message",
+    role: "assistant",
+    model: payload?.model || fallbackModel || getDefaultModelId(),
+    content,
+    stop_reason: toAnthropicStopReason(choice.finish_reason),
+    stop_sequence: null,
+    usage: {
+      input_tokens: Number(payload?.usage?.prompt_tokens || 0),
+      output_tokens: Number(payload?.usage?.completion_tokens || 0)
+    }
+  };
+}
+
+function writeAnthropicEvent(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+function streamAnthropicMessage(res, message) {
+  writeAnthropicEvent(res, "message_start", {
+    type: "message_start",
+    message: {
+      id: message.id,
+      type: "message",
+      role: "assistant",
+      model: message.model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: {
+        input_tokens: message.usage.input_tokens,
+        output_tokens: 0
+      }
+    }
+  });
+
+  let contentIndex = 0;
+  let emittedOutputTokens = 0;
+  for (const block of message.content) {
+    if (block.type === "text") {
+      writeAnthropicEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index: contentIndex,
+        content_block: { type: "text", text: "" }
+      });
+      writeAnthropicEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index: contentIndex,
+        delta: { type: "text_delta", text: block.text }
+      });
+      writeAnthropicEvent(res, "content_block_stop", {
+        type: "content_block_stop",
+        index: contentIndex
+      });
+      emittedOutputTokens += estimateTokensFromOutput(block.text);
+      contentIndex += 1;
+      continue;
+    }
+
+    if (block.type === "tool_use") {
+      writeAnthropicEvent(res, "content_block_start", {
+        type: "content_block_start",
+        index: contentIndex,
+        content_block: {
+          type: "tool_use",
+          id: block.id,
+          name: block.name,
+          input: {}
+        }
+      });
+      writeAnthropicEvent(res, "content_block_delta", {
+        type: "content_block_delta",
+        index: contentIndex,
+        delta: {
+          type: "input_json_delta",
+          partial_json: JSON.stringify(block.input || {})
+        }
+      });
+      writeAnthropicEvent(res, "content_block_stop", {
+        type: "content_block_stop",
+        index: contentIndex
+      });
+      emittedOutputTokens += estimateTokensFromOutput(JSON.stringify(block.input || {}));
+      contentIndex += 1;
+    }
+  }
+
+  writeAnthropicEvent(res, "message_delta", {
+    type: "message_delta",
+    delta: {
+      stop_reason: message.stop_reason,
+      stop_sequence: null
+    },
+    usage: {
+      output_tokens: emittedOutputTokens
+    }
+  });
+  writeAnthropicEvent(res, "message_stop", { type: "message_stop" });
+}
+
+async function proxyAnthropicMessages(req, res) {
+  if (!requireApiKey(req, res)) return;
+
+  if (!readConfig().serviceEnabled) {
+    sendJson(res, 503, {
+      type: "error",
       error: {
-        message: "content is required",
-        type: "invalid_request_error"
+        type: "service_unavailable",
+        message: "API proxy service is stopped"
       }
     });
     return;
   }
 
-  if (ctyunBody.conversation_id || ctyunBody.message_id) {
-    writeCtyunConversation(conversationKey, {
-      keyModel,
-      conversationId: ctyunBody.conversation_id,
-      messageId: ctyunBody.message_id
-    });
-  }
-
+  const anthropicBody = await readJsonBody(req);
+  const openaiBody = toOpenAIBodyFromAnthropic(anthropicBody);
   const requestId = createHash("sha1")
-    .update(`${Date.now()}-${JSON.stringify(ctyunBody.messages.map((message) => message.content))}`)
+    .update(`${Date.now()}-${JSON.stringify(openaiBody)}`)
     .digest("hex")
     .slice(0, 16);
-  const promptTokens = ctyunBody.messages.reduce((total, message) => total + estimatePromptTokens(message), 0);
+  const promptTokens = estimateTokensFromMessages(openaiBody.messages);
 
-  const upstream = await fetch(CTYUN_CHAT_URL, {
+  const upstream = await fetch(UPSTREAM_URL, {
     method: "POST",
-    headers: buildCtyunHeaders(cookie),
-    body: JSON.stringify(ctyunBody)
+    headers: buildUpstreamHeaders(),
+    body: JSON.stringify(openaiBody)
   });
 
-  res.writeHead(upstream.status, {
-    "content-type": upstream.headers.get("content-type") || "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-    "access-control-allow-origin": "*"
+  const rawText = await upstream.text();
+  if (!upstream.ok) {
+    sendJson(res, upstream.status || 502, {
+      type: "error",
+      error: {
+        type: "upstream_error",
+        message: rawText || `Upstream request failed with status ${upstream.status}`
+      }
+    });
+    return;
+  }
+
+  const normalized = normalizeSseText(rawText);
+  const chunks = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim())
+    .filter((text) => text && text !== "[DONE]");
+
+  let finalPayload = null;
+  for (const text of chunks) {
+    try {
+      finalPayload = normalizeCompletion(JSON.parse(text));
+    } catch {
+      // Ignore non-json lines.
+    }
+  }
+
+  if (!finalPayload) {
+    sendJson(res, 502, {
+      type: "error",
+      error: {
+        type: "upstream_error",
+        message: "Upstream returned empty response"
+      }
+    });
+    return;
+  }
+
+  const completionTokens = estimateTokensFromOutput(JSON.stringify(finalPayload?.choices || finalPayload));
+  appendUsage({
+    id: requestId,
+    createdAt: new Date().toISOString(),
+    model: openaiBody.model,
+    keyModel: openaiBody.model,
+    promptTokens,
+    completionTokens,
+    tokens: promptTokens + completionTokens
   });
 
-  if (!upstream.body) {
+  const message = buildAnthropicMessageResponseFromOpenAI(
+    finalPayload,
+    anthropicBody.model || getDefaultModelId()
+  );
+  if (anthropicBody.stream) {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "access-control-allow-origin": "*"
+    });
+    streamAnthropicMessage(res, message);
     res.end();
     return;
   }
 
-  const reader = upstream.body.getReader();
-  let completionText = "";
-  let upstreamConversation = {};
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunkBuffer = Buffer.from(value);
-      const chunkText = chunkBuffer.toString("utf8");
-      completionText += extractDeltaTextFromSseChunk(chunkText);
-      upstreamConversation = {
-        ...upstreamConversation,
-        ...extractCtyunConversationFromSseChunk(chunkText)
-      };
-      res.write(chunkBuffer);
-    }
-  } finally {
-    if (upstreamConversation.conversationId || upstreamConversation.messageId) {
-      writeCtyunConversation(conversationKey, {
-        keyModel,
-        ...upstreamConversation
-      });
-    }
-
-    if (upstream.ok) {
-      const completionTokens = estimateTokens(completionText);
-      appendUsage({
-        id: requestId,
-        createdAt: new Date().toISOString(),
-        model: openaiBody.model || keyModel,
-        keyModel,
-        promptTokens,
-        completionTokens,
-        tokens: promptTokens + completionTokens
-      });
-    }
-    res.end();
-  }
+  sendJson(res, 200, message);
 }
 
 async function handleModels(req, res) {
@@ -1659,46 +1299,27 @@ async function handleModels(req, res) {
     return;
   }
 
-  const ctyunModels = await queryCtyunModels(getRequestCookie(req));
-
-  sendJson(res, 200, toOpenAIModels(ctyunModels));
+  sendJson(res, 200, await getAvailableModels());
 }
 
-async function handleConversations(req, res, url) {
+async function handleConversations(req, res) {
   if (!requireApiKey(req, res)) return;
-
-  if (!readConfig().serviceEnabled) {
-    sendJson(res, 503, {
-      error: {
-        message: "API proxy service is stopped",
-        type: "service_unavailable"
-      }
-    });
-    return;
-  }
-
-  const ctyunBody = await queryCtyunHistory(getRequestCookie(req), {
-    conversationType: url.searchParams.get("conversation_type") || "all",
-    page: url.searchParams.get("page") || 0,
-    size: url.searchParams.get("limit") || url.searchParams.get("size") || 10
+  sendJson(res, 200, {
+    object: "list",
+    data: [],
+    first_id: null,
+    last_id: null,
+    has_more: false,
+    metadata: {
+      total: 0,
+      page: 0,
+      size: 0
+    }
   });
-
-  sendJson(res, 200, toOpenAIConversationList(ctyunBody));
 }
 
-async function handleConversationItems(req, res, conversationId, url) {
+async function handleConversationItems(req, res, conversationId) {
   if (!requireApiKey(req, res)) return;
-
-  if (!readConfig().serviceEnabled) {
-    sendJson(res, 503, {
-      error: {
-        message: "API proxy service is stopped",
-        type: "service_unavailable"
-      }
-    });
-    return;
-  }
-
   if (!conversationId) {
     sendJson(res, 400, {
       error: {
@@ -1709,17 +1330,23 @@ async function handleConversationItems(req, res, conversationId, url) {
     return;
   }
 
-  const ctyunBody = await queryCtyunConversationItems(getRequestCookie(req), {
-    conversationId,
-    count: url.searchParams.get("limit") || url.searchParams.get("count") || 20
+  sendJson(res, 200, {
+    object: "list",
+    data: [],
+    first_id: null,
+    last_id: null,
+    has_more: false,
+    metadata: {
+      conversation_id: conversationId,
+      total: 0,
+      page: 0,
+      size: 0
+    }
   });
-
-  sendJson(res, 200, toOpenAIConversationItems(ctyunBody));
 }
 
 async function handleConversation(req, res, conversationId) {
   if (!requireApiKey(req, res)) return;
-
   if (!conversationId) {
     sendJson(res, 400, {
       error: {
@@ -1776,7 +1403,9 @@ async function handleLogout(_req, res) {
   sendJson(
     res,
     200,
-    { ok: true },
+    {
+      ok: true
+    },
     {
       "set-cookie": clearSessionCookie()
     }
@@ -1784,34 +1413,30 @@ async function handleLogout(_req, res) {
 }
 
 async function handleCurrentUser(req, res) {
-  const user = requireAdminAuth(req, res);
-  if (!user) return;
-
-  sendJson(res, 200, {
-    user
-  });
-}
-
-async function handleChangePassword(req, res) {
-  const sessionUser = requireAdminAuth(req, res);
-  if (!sessionUser) return;
-
-  const body = await readJsonBody(req);
-  const currentPassword = String(body.currentPassword || "");
-  const nextPassword = String(body.nextPassword || "");
-  const user = readUserConfig();
-
-  if (!currentPassword || !nextPassword) {
-    sendJson(res, 400, {
+  const user = getSessionUser(req);
+  if (!user) {
+    sendJson(res, 401, {
       error: {
-        message: "当前密码和新密码不能为空",
-        type: "invalid_request_error"
+        message: "请先登录",
+        type: "authentication_error"
       }
     });
     return;
   }
 
-  if (!verifyPassword(user, currentPassword)) {
+  sendJson(res, 200, { user });
+}
+
+async function handleChangePassword(req, res) {
+  const user = requireAdminAuth(req, res);
+  if (!user) return;
+
+  const body = await readJsonBody(req);
+  const currentPassword = String(body.currentPassword || "");
+  const nextPassword = String(body.nextPassword || "");
+  const config = readUserConfig();
+
+  if (!verifyPassword(config, currentPassword)) {
     sendJson(res, 400, {
       error: {
         message: "当前密码错误",
@@ -1822,7 +1447,7 @@ async function handleChangePassword(req, res) {
   }
 
   const nextUser = writeUserConfig({
-    ...user,
+    ...config,
     ...createPasswordRecord(nextPassword)
   });
 
@@ -1844,38 +1469,15 @@ async function handleChangePassword(req, res) {
   );
 }
 
-async function handleDashboard(req, res) {
-  const cookie = getRequestCookie(req);
+async function handleDashboard(_req, res) {
   const config = readConfig();
-  let account = getAccountInfo(cookie);
-  let models = [];
-  let modelsError = "";
-  let accountError = "";
-
-  const [userInfoResult, modelsResult] = await Promise.allSettled([
-    queryCtyunUserInfo(cookie),
-    queryCtyunModels(cookie)
-  ]);
-
-  if (userInfoResult.status === "fulfilled") {
-    account = {
-      ...account,
-      ...userInfoResult.value
-    };
-  } else {
-    accountError = userInfoResult.reason?.message || "账号信息获取失败";
-  }
-
-  if (modelsResult.status === "fulfilled") {
-    models = toOpenAIModels(modelsResult.value).data;
-  } else {
-    modelsError = modelsResult.reason?.message || "模型列表获取失败";
-  }
+  const account = getAccountInfo(config.upstreamToken);
+  const models = (await getAvailableModels()).data;
 
   sendJson(res, 200, {
     account: {
       ...account,
-      accountError
+      accountError: config.upstreamToken ? "" : "请在账号管理中配置上游令牌"
     },
     service: {
       enabled: config.serviceEnabled,
@@ -1883,7 +1485,7 @@ async function handleDashboard(req, res) {
       listenPort: config.listenPort
     },
     models,
-    modelsError,
+    modelsError: "",
     usage: summarizeUsage()
   });
 }
@@ -1898,8 +1500,8 @@ async function handleGetConfig(_req, res) {
   }
 
   sendJson(res, 200, {
-    hasCookie: Boolean(config.cookie),
-    cookiePreview: getMaskedTokenPreview(config.cookie),
+    hasToken: Boolean(config.upstreamToken),
+    tokenPreview: getMaskedTokenPreview(config.upstreamToken),
     updatedAt: config.updatedAt,
     serviceEnabled: config.serviceEnabled,
     autoStart: config.autoStart,
@@ -1913,12 +1515,13 @@ async function handleGetConfig(_req, res) {
 async function handlePostConfig(req, res) {
   const body = await readJsonBody(req);
   const current = readConfig();
-  const cookie = typeof body.cookie === "string" ? normalizeCookie(body.cookie) : current.cookie;
+  const upstreamToken =
+    typeof body.upstreamToken === "string" ? normalizeBearerToken(body.upstreamToken) : current.upstreamToken;
 
-  if (typeof body.cookie === "string" && !cookie) {
+  if (typeof body.upstreamToken === "string" && !upstreamToken) {
     sendJson(res, 400, {
       error: {
-        message: "cookie is required",
+        message: "upstreamToken is required",
         type: "invalid_request_error"
       }
     });
@@ -1926,7 +1529,7 @@ async function handlePostConfig(req, res) {
   }
 
   const config = writeConfig({
-    cookie,
+    upstreamToken,
     serviceEnabled: body.serviceEnabled,
     autoStart: true,
     listenPort: body.listenPort,
@@ -1941,8 +1544,8 @@ async function handlePostConfig(req, res) {
 
   sendJson(res, 200, {
     ok: true,
-    hasCookie: Boolean(config.cookie),
-    cookiePreview: getMaskedTokenPreview(config.cookie),
+    hasToken: Boolean(config.upstreamToken),
+    tokenPreview: getMaskedTokenPreview(config.upstreamToken),
     updatedAt: config.updatedAt,
     serviceEnabled: config.serviceEnabled,
     autoStart: config.autoStart,
@@ -2077,9 +1680,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/health") {
-      sendJson(res, 200, { ok: true });
-      return;
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
+      if (url.pathname === "/health") {
+        sendJson(res, 200, { ok: true, service: "ct-api-proxy" });
+        return;
+      }
     }
 
     if (req.method === "POST" && url.pathname === "/api/auth/login") {
@@ -2143,6 +1748,13 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/debug/logs") {
+      if (!requireApiKey(req, res)) return;
+      const n = Number(url.searchParams.get("n") || 20);
+      sendJson(res, 200, getRecentLogs(n));
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/v1/conversations") {
       await handleConversations(req, res, url);
       return;
@@ -2168,6 +1780,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/v1/messages") {
+      await proxyAnthropicMessages(req, res);
+      return;
+    }
+
     if (req.method === "GET") {
       serveStatic(req, res);
       return;
@@ -2187,16 +1804,17 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    sendJson(res, 500, {
+    sendJson(res, error.status || 500, {
       error: {
         message: error.message || "Internal server error",
-        type: "server_error"
+        type: error.status ? "invalid_request_error" : "server_error"
       }
     });
   }
 });
 
 ensureDataFiles();
+upgradeLegacyConfig();
 reconcileUpdateStatusOnStartup();
 currentListenPort = readConfig().listenPort;
 
