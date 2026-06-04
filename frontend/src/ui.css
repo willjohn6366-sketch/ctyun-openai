@@ -36,6 +36,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -659,7 +660,8 @@ button:focus-visible {
 }
 
 .field textarea,
-.field input {
+.field input,
+.field select {
   width: 100%;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
@@ -677,7 +679,8 @@ button:focus-visible {
   line-height: 1.6;
 }
 
-.field input {
+.field input,
+.field select {
   height: 42px;
   padding: 0 12px;
 }
@@ -949,7 +952,8 @@ body.dark .model-id {
 }
 
 body.dark .field textarea,
-body.dark .field input {
+body.dark .field input,
+body.dark .field select {
   background: #0d1728;
   color: #edf4ff;
 }

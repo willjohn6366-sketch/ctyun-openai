@@ -585,25 +585,49 @@ function writeConfig(nextConfig) {
   return config;
 }
 
-function getPreferredLanIp() {
+function getAvailableProxyHosts() {
   const interfaces = networkInterfaces();
+  const hosts = [];
+  const seen = new Set();
 
-  for (const entries of Object.values(interfaces)) {
+  for (const [name, entries] of Object.entries(interfaces)) {
     for (const entry of entries || []) {
       if (entry.family === "IPv4" && !entry.internal) {
-        return entry.address;
+        if (seen.has(entry.address)) continue;
+        seen.add(entry.address);
+        hosts.push({
+          label: `${name} (${entry.address})`,
+          host: entry.address,
+          internal: false
+        });
       }
     }
   }
 
-  return "127.0.0.1";
+  if (!seen.has("127.0.0.1")) {
+    hosts.unshift({
+      label: "本机 (127.0.0.1)",
+      host: "127.0.0.1",
+      internal: true
+    });
+  }
+
+  return hosts;
 }
 
 function buildProxyUrls(port) {
-  const host = getPreferredLanIp();
+  const hosts = getAvailableProxyHosts();
+  const urls = hosts.map((item) => ({
+    ...item,
+    baseUrl: `http://${item.host}:${port}`,
+    chatCompletionsUrl: `http://${item.host}:${port}/v1/chat/completions`
+  }));
+  const preferred = urls.find((item) => !item.internal) || urls[0];
+
   return {
-    baseUrl: `http://${host}:${port}`,
-    chatCompletionsUrl: `http://${host}:${port}/v1/chat/completions`
+    baseUrl: preferred?.baseUrl || `http://127.0.0.1:${port}`,
+    chatCompletionsUrl: preferred?.chatCompletionsUrl || `http://127.0.0.1:${port}/v1/chat/completions`,
+    proxyUrls: urls
   };
 }
 
@@ -1521,7 +1545,8 @@ async function handleGetConfig(_req, res) {
     listenPort: config.listenPort,
     token,
     baseUrl: urls.baseUrl,
-    chatCompletionsUrl: urls.chatCompletionsUrl
+    chatCompletionsUrl: urls.chatCompletionsUrl,
+    proxyUrls: urls.proxyUrls
   });
 }
 
@@ -1566,7 +1591,8 @@ async function handlePostConfig(req, res) {
     portChanged,
     token: config.apiKey,
     baseUrl: urls.baseUrl,
-    chatCompletionsUrl: urls.chatCompletionsUrl
+    chatCompletionsUrl: urls.chatCompletionsUrl,
+    proxyUrls: urls.proxyUrls
   });
 }
 

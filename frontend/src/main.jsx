@@ -128,6 +128,7 @@ function App() {
   const [config, setConfig] = useState(null);
   const [upstreamTokenInput, setUpstreamTokenInput] = useState("");
   const [listenPort, setListenPort] = useState(3000);
+  const [selectedProxyUrl, setSelectedProxyUrl] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
   const [nextPassword, setNextPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -256,6 +257,10 @@ function App() {
     setConfig(nextConfig);
     setUpstreamTokenInput("");
     setListenPort(nextConfig.listenPort || 3000);
+    setSelectedProxyUrl((current) => {
+      if (nextConfig.proxyUrls?.some((item) => item.baseUrl === current)) return current;
+      return nextConfig.proxyUrls?.[0]?.baseUrl || nextConfig.baseUrl || "";
+    });
   }
 
   useEffect(() => {
@@ -390,6 +395,10 @@ function App() {
       });
       setConfig(nextConfig);
       setListenPort(nextConfig.listenPort || 3000);
+      setSelectedProxyUrl((current) => {
+        if (nextConfig.proxyUrls?.some((item) => item.baseUrl === current)) return current;
+        return nextConfig.proxyUrls?.[0]?.baseUrl || nextConfig.baseUrl || "";
+      });
       showToast(nextConfig.portChanged ? `已切换到 ${nextConfig.baseUrl}` : "服务配置已保存");
       if (nextConfig.portChanged && nextConfig.baseUrl) {
         window.setTimeout(() => {
@@ -875,10 +884,21 @@ function App() {
                   <label className="field service-url-field">
                     <span>代理地址</span>
                     <div className="copy-row">
-                      <input value={config?.baseUrl || ""} readOnly />
+                      <select
+                        value={selectedProxyUrl || config?.baseUrl || ""}
+                        onChange={(event) => setSelectedProxyUrl(event.target.value)}
+                      >
+                        {(config?.proxyUrls?.length ? config.proxyUrls : [{ label: config?.baseUrl || "代理地址", baseUrl: config?.baseUrl || "" }])
+                          .filter((item) => item.baseUrl)
+                          .map((item) => (
+                            <option key={item.baseUrl} value={item.baseUrl}>
+                              {item.label ? `${item.label} - ${item.baseUrl}` : item.baseUrl}
+                            </option>
+                          ))}
+                      </select>
                       <button
                         className="secondary-button"
-                        onClick={() => copyText(config?.baseUrl || "")}
+                        onClick={() => copyText(selectedProxyUrl || config?.baseUrl || "")}
                         type="button"
                       >
                         复制
