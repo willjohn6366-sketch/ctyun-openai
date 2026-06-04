@@ -523,7 +523,13 @@ function readModelCatalog() {
       object: "model",
       created: 0,
       owned_by: item.owned_by || "ctyun",
-      title: item.presetModelName || item.title || item.display_name || item.name || item.id.trim(),
+      title:
+        item.key_model ||
+        item.presetModelName ||
+        item.title ||
+        item.display_name ||
+        item.name ||
+        item.id.trim(),
       presetModelName: item.presetModelName || item.title || item.display_name || item.name || item.id.trim(),
       typeLabel: item.typeLabel || item.type_label || item.type || "",
       seriesLabel: item.seriesLabel || item.series_label || "",
