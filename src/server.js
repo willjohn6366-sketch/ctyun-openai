@@ -559,6 +559,26 @@ function getDefaultModelId() {
   return readModelCatalog()[0]?.id || "default-model";
 }
 
+function resolveUpstreamModel(requestedModel) {
+  const requested = String(requestedModel || "").trim();
+  const catalog = readModelCatalog();
+  if (!requested) {
+    return catalog[0]?.key_model || catalog[0]?.id || "default-model";
+  }
+
+  const match = catalog.find(
+    (item) =>
+      requested === String(item.id || "") ||
+      requested === String(item.key_model || "") ||
+      requested === String(item.title || "") ||
+      requested === String(item.presetModelName || "") ||
+      requested === String(item.display_name || "") ||
+      requested === String(item.source_model_id || "")
+  );
+
+  return match?.key_model || requested;
+}
+
 function writeConfig(nextConfig) {
   const current = readConfig();
   const config = {
@@ -879,12 +899,15 @@ function normalizeChatRequest(body) {
     throw error;
   }
 
+  const requestedModel =
+    typeof body.model === "string" && body.model.trim()
+      ? body.model.trim()
+      : getDefaultModelId();
+
   return {
     ...body,
-    model:
-      typeof body.model === "string" && body.model.trim()
-        ? body.model.trim()
-        : getDefaultModelId(),
+    model: resolveUpstreamModel(requestedModel),
+    original_model: requestedModel,
     stream: Boolean(body.stream)
   };
 }
@@ -1005,6 +1028,10 @@ function extractAnthropicTextBlocks(content) {
 
 function toOpenAIBodyFromAnthropic(body) {
   const messages = [];
+  const requestedModel =
+    typeof body.model === "string" && body.model.trim()
+      ? body.model.trim()
+      : getDefaultModelId();
 
   if (typeof body.system === "string" && body.system.trim()) {
     messages.push({
@@ -1068,7 +1095,8 @@ function toOpenAIBodyFromAnthropic(body) {
   }
 
   return {
-    model: getDefaultModelId(),
+    model: resolveUpstreamModel(requestedModel),
+    original_model: requestedModel,
     messages,
     tools: Array.isArray(body.tools)
       ? body.tools.map((tool) => ({
